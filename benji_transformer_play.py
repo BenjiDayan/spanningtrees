@@ -1,3 +1,4 @@
+from functools import reduce
 from typing import List, Tuple
 
 import numpy as np
@@ -11,10 +12,24 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from spanningtrees.mst import MST
+import graphviz
 
 torch.manual_seed(42)
 np.random.seed(42)
 
+
+def get_graphviz(tokens, dep_to_head):
+  G = graphviz.Digraph()
+  tokens = ['root'] + tokens
+  # print(tokens)
+  for i, token in enumerate(tokens):
+    G.node('q' + str(i), str(i) + '_' + token)
+
+  for dep_i, head_i in enumerate(dep_to_head):
+    h, d = tokens[head_i], tokens[dep_i + 1]
+    # print(h, d)
+    G.edge('q' + str(head_i), 'q' + str(dep_i + 1))
+  return G
 
 def get_word_idx(sent: str, word: str):
     return sent.split(" ").index(word)
@@ -361,6 +376,62 @@ def get_mst(extended_mat, r, mat, Z, target):
     return constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs
 
 
+def beam_search_matrix(mat: np.array, n_beam=1):
+    """simple beam search on matrix. Positive scores are better. it's a head x dep matrix, n+1xn where first row
+    is the score for having head as root. Any valid tree must have one root and no cycles - this is enforced by tweaking
+    scores, with many copies of edited matrices"""
+    def get_dependent_set(word_i: int, current_heads):
+        """
+        current_heads should be a numpy array of integers.
+        e.g. [-1, 1, 2, 0] with word_i = 1 (actually word 0)
+        So return value is [0,1,2]"""
+        dependents = {word_i}
+        new_dependents = {word_i}
+        while new_dependents != set():
+            new_dependents = [[x+1 for x in np.where(current_heads == i)[0]] for i in new_dependents]
+            # join together new dependents into a list then take a set just in case there are duplicates
+            new_dependents = set(reduce(lambda x, y: x + y, new_dependents, []))
+            if new_dependents.issubset(dependents):
+                break
+            dependents = dependents.union(new_dependents)
+
+        return dependents
+
+    n_words = mat.shape[1]  # number of words - we must choose exactly n_words arcs, one head for each word.
+    # stored as (current_score_matrix, current_heads, current_score) pairs
+    # we designate -1 as no head, 0 as root, 1 as first word etc.
+    # So [-1, 1, 2, 0] means words 0, 1, 2, 3 have 0 no head, 1 has head 0, 2 has head 1 and 3 has head root
+    # only acceptable next setp is [4,1,2,0] i.e. word 0 has head word 3.
+    mat = mat.copy()
+    mat[range(1, n_words+1), range(n_words)]= -np.inf
+    matrix_set = [(mat.copy(), -np.ones((n_words,)), 0.)]
+    for n in range(n_words):
+        new_matrix_set = []
+        for current_score_matrix, current_heads, current_score in matrix_set:
+            for dep_i in np.where(current_heads == -1)[0]:
+                for head_i in range(n_words+1):
+                    new_score_matrix = current_score_matrix.copy()
+                    new_heads = current_heads.copy()
+                    new_score = current_score + current_score_matrix[head_i, dep_i]
+                    new_heads[dep_i] = head_i  # don't account for root here, -1 is empty, 0 is root, 1 is 1st word etc.
+                    if head_i == 0:  # chose root as head
+                        new_score_matrix[0, :] = -np.inf  # no one else can have root as head
+                    else:
+                        # e.g. [-1, 1, 2, 0] where head_i=1 (new head just assigned is word 1 has head word 0)
+                        # output is [1,2,3] which we don't convert to [0,1,2]: word 0 has children 0,1,2
+                        # leave as is as we're using these as new heads to set to -inf
+                        children = list(get_dependent_set(head_i, new_heads))
+                        # head may not attach to any of its children, including itself. head_i=1 is dep 0 etc. so -1
+                        new_score_matrix[children, head_i-1] = -np.inf
+
+                    new_matrix_set.append((new_score_matrix, new_heads, new_score))
+
+        temp = {tuple(heads): i for i, (mat, heads, score) in enumerate(new_matrix_set)}
+        new_matrix_set = [new_matrix_set[i] for i in temp.values()]  # non duplicates
+        new_matrix_set.sort(key=lambda triple: triple[2], reverse=True)
+        matrix_set = new_matrix_set[:n_beam]
+
+    return matrix_set
 
 
 def do_train(word_embeddings, sentence_embedding, target, scorer):
@@ -377,6 +448,9 @@ def do_train(word_embeddings, sentence_embedding, target, scorer):
     n = len(r)
     exp_mat[range(n), range(n)] = 0.
 
+
+    # Partition is quite sensitive. If values of r, exp are too small, then Z=0, and if too large then
+    # Z=inf - this causes prob to be inf, 0 respectively, and neg log prob to be inf, -inf resp.
     Z1, Z2 = get_partition(r_exp, exp_mat)
 
     #### Find maximum spanning tree, and its corresponding score
@@ -410,7 +484,7 @@ def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None
 
     scorer = Scorer2().to(device)
 
-
+    save_path = (log_dir + '/save' if log_dir else './save') + '_epoch{epoch}.pt'
 
     writer = SummaryWriter(log_dir=log_dir)
 
@@ -522,6 +596,8 @@ def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None
             loop.set_description(f"Epoch [{epoch}/{n_epochs}]")
             loop.set_postfix(loss=losses.mean().item())
 
+        torch.save(scorer.state_dict(), save_path.format(epoch=epoch))
+
 
 if __name__ == '__main__':
     import argparse
@@ -529,7 +605,7 @@ if __name__ == '__main__':
     parser.add_argument("--lr", default=1e-3, type=float)
     parser.add_argument("--n_batch", default=5, type=int)
     parser.add_argument("--n_epochs", default=100, type=int)
-    parser.add_argument("--log_dir")
+    parser.add_argument("--log_dir", default='./runs/log')
     parser.add_argument("--hist_weights_every", default=5, type=int)
     args = parser.parse_args()
     print(vars(args))
