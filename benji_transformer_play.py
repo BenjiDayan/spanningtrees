@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import List, Tuple
+from typing import List, Tuple, Set
 
 import numpy as np
 import torch
@@ -211,16 +211,6 @@ class Scorer2(nn.Module):
         return out
 
 
-# class Softmax_Scorer(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         self.scorer = Scorer()
-#         self.root_embedding = nn.Sequential
-#
-#     def forward(self, word_vecs_head, word_vec_dep):
-#         scores = torch.stack([self.scorer(word_vec_head, word_vec_dep) for word_vec_head in word_vecs_head])
-#         return F.softmax(scores, dim=-1)
-
 def laplacian(A: torch.Tensor):
     L = -A  # L_ij = -A_ij
     n = len(A)
@@ -320,6 +310,7 @@ def group_indices_by_num(int_list):
 
 
 def get_partition(r_exp, exp_mat):
+    """Computes sum over all valid spanning tree exp scores."""
 
     #### Calculate partition function Z
     L1 = laplacian(exp_mat)
@@ -339,9 +330,17 @@ def get_partition(r_exp, exp_mat):
 
 
 def get_mst(extended_mat, r, mat, Z, target):
+    """
+
+    :param extended_mat:
+    :param r:
+    :param mat:
+    :param Z:
+    :param target:
+    :return: constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs
+    I believe this is the mst itself, its prob/neg log prob, and the target tree's prob/neglog prob.
+    """
     # #### Find maximum spanning tree, and its corresponding score
-    # extended_mat = torch.concat([r.unsqueeze(dim=0), mat], dim=0)
-    # extended_mat = torch.concat([torch.zeros((extended_mat.shape[0], 1)), extended_mat], dim=1)
 
     mst = MST(extended_mat.detach().cpu().numpy())
     constr = mst.mst(True)
@@ -376,15 +375,22 @@ def get_mst(extended_mat, r, mat, Z, target):
     return constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs
 
 
-def beam_search_matrix(mat: np.array, n_beam=1):
-    """simple beam search on matrix. Positive scores are better. it's a head x dep matrix, n+1xn where first row
-    is the score for having head as root. Any valid tree must have one root and no cycles - this is enforced by tweaking
-    scores, with many copies of edited matrices"""
-    def get_dependent_set(word_i: int, current_heads):
-        """
+def beam_search_matrix(mat: np.ndarray, n_beam = 1):
+    """simple beam search on matrix. Positive scores are better. Any valid tree must have one root and no cycles -
+    this is enforced by tweaking scores, with many copies of edited matrices
+
+    :param mat:  head x dep matrix, n+1xn where first row is the score for having head as root
+    :param n_beam: number of beams for beam search
+    """
+    def get_dependent_set(word_i: int, current_heads: np.ndarray) -> Set[int]:
+        """Given the current (incomplete) dep parse tree current_heads, and a word index word_i, finds the word numbers
+        (one more than the indices) of words which are in the subtree headed at word_i - i.e. eventually dependent.
+        This includes word_i itself.
+
         current_heads should be a numpy array of integers.
-        e.g. [-1, 1, 2, 0] with word_i = 1 (actually word 0)
-        So return value is [0,1,2]"""
+        e.g. [-1, 1, 2, 0] with word_i = 1 (the first word, index 0)
+        So return value is [1,2,3] as ? -> 1 -> 2 -> 3 and root -> 4
+        """
         dependents = {word_i}
         new_dependents = {word_i}
         while new_dependents != set():
@@ -400,10 +406,11 @@ def beam_search_matrix(mat: np.array, n_beam=1):
     n_words = mat.shape[1]  # number of words - we must choose exactly n_words arcs, one head for each word.
     # stored as (current_score_matrix, current_heads, current_score) pairs
     # we designate -1 as no head, 0 as root, 1 as first word etc.
-    # So [-1, 1, 2, 0] means words 0, 1, 2, 3 have 0 no head, 1 has head 0, 2 has head 1 and 3 has head root
-    # only acceptable next setp is [4,1,2,0] i.e. word 0 has head word 3.
+    # So [-1, 1, 2, 0] means words at indices 0, 1, 2, 3 have 0 no head, 1 has head 0, 2 has head 1 and 3 has head root
+    # only acceptable next step is [4,1,2,0] i.e. word 0 has head word 3.
     mat = mat.copy()
-    mat[range(1, n_words+1), range(n_words)]= -np.inf
+    mat[range(1, n_words+1), range(n_words)] = -np.inf
+    # I think this is (modified score matrix, current assigned dep tree, score) triples
     matrix_set = [(mat.copy(), -np.ones((n_words,)), 0.)]
     for n in range(n_words):
         new_matrix_set = []
@@ -434,11 +441,23 @@ def beam_search_matrix(mat: np.array, n_beam=1):
     return matrix_set
 
 
-def do_train(word_embeddings, sentence_embedding, target, scorer):
+def train_on_sentence(word_embeddings: torch.Tensor, sentence_embedding: torch.Tensor, target, scorer: Scorer2):
+    """
+    Computes head -> dep score matrix. Uses this to find the maximum spanning tree (MST) parse, as well as the partition
+    Z (sum of exp scores over all valid trees). Together this gives the MST prob and target prob.
+    Additionally compute a simple head -> dep wise cross entropy loss which turns out to be a better training objective
+    than MST prob (? why tho).
+
+    :param word_embeddings: for each word in the sentence
+    :param sentence_embedding: of the whole sentence - need for computing root node -> root word scores.
+    :param target: target ground truth dependency tree
+    :param scorer: model to compute head -> dep scores.
+    :return: loss, pred, constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs
+    """
     big_mat = scorer(torch.concat([sentence_embedding, word_embeddings]), tanh=False)
 
-    mat = big_mat[1:, 1:]
-    r = big_mat[0, 1:]
+    mat = big_mat[1:, 1:]  # nxn word head x dep scores
+    r = big_mat[0, 1:]  # n root -> word scores
 
     # interestingly the grad for exp seems to depend on the output not input. Hence clone here, to avoid
     # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation
@@ -453,16 +472,13 @@ def do_train(word_embeddings, sentence_embedding, target, scorer):
     # Z=inf - this causes prob to be inf, 0 respectively, and neg log prob to be inf, -inf resp.
     Z1, Z2 = get_partition(r_exp, exp_mat)
 
-    #### Find maximum spanning tree, and its corresponding score
+    # Find maximum spanning tree, and its corresponding score
     extended_mat = torch.concat([r.unsqueeze(dim=0), mat], dim=0)
     extended_mat = torch.concat([torch.zeros((extended_mat.shape[0], 1)).to(device), extended_mat], dim=1)
 
     constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs = get_mst(extended_mat, r, mat, Z2, target)
 
-    # target = torch.tensor(list(map(int, a['head'])))
-    # loss = F.cross_entropy(torch.concat([r.unsqueeze(dim=-1), mat], dim=1), torch.tensor(constr[1:], dtype=torch.long),
-    #                 reduction="sum")
-
+    # cross entropy loss - simpler and works better than mst_neg_log_probs as loss?
     # (N, C) where N is # of words and C is # of classes
     pred = torch.concat([r.unsqueeze(dim=-1), mat.T], dim=1)
     loss = F.cross_entropy(pred,
@@ -476,16 +492,14 @@ def do_train(word_embeddings, sentence_embedding, target, scorer):
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None):
+def main(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None):
+    # load tokenizer, model and dataset.
     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
     model = AutoModel.from_pretrained("bert-base-cased", output_hidden_states=True).to(device)
-
     data = datasets.load_dataset("universal_dependencies", "en_gum")
 
     scorer = Scorer2().to(device)
-
     save_path = (log_dir + '/save' if log_dir else './save') + '_epoch{epoch}.pt'
-
     writer = SummaryWriter(log_dir=log_dir)
 
     # lr = 1e-4
@@ -494,35 +508,34 @@ def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None
     eps=1e-12
     optimizer = torch.optim.Adam(scorer.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
 
-    # train_dataset = TensorDataset(tensor_x, tensor_y)  # create your datset
-    # my_dataloader = DataLoader(my_dataset)
 
     training_data = [sequence for sequence in data['train'] if len(sequence['tokens']) < 40]
 
     val_data = [sequence for sequence in data['test'] if len(sequence['tokens']) < 40]
     val_indices = np.arange(len(val_data))
-    # n_epochs = 20
-    # n_batch = 32
-    # hist_weights_every = 5
+
     for epoch in range(n_epochs):
         train_indices = np.random.permutation(len(training_data))
         train_indices = [train_indices[n_batch * i:n_batch * (i + 1)] for i in range(len(train_indices) // n_batch)]
         loop = tqdm.tqdm(train_indices)
         for iter_i, data_i in enumerate(loop):
+            # batch of training data (multiple sentences)
             input_data = [training_data[i] for i in data_i]
 
             # extract an embedding for each sentence, as well as embeddings for each word in the sentence.
             # some sentences (and corresponding targets) are filtered out if we cannot achieve a partition refinement
             # relation between input data words and the BERT tokens (actually the BERT words for simplification)
+            # get embeddings for batch of training all in one go (faster?)
             sentences_embedding, sentences_word_embeddings, targets = get_embeddings(input_data, tokenizer, model)
 
             optimizer.zero_grad()
             losses = []
             mst_probs = []
             target_probs = []
+            # Simplest to process each sentence/dependency tree target separately.
             for word_embeddings, sentence_embedding, target in zip(sentences_word_embeddings, sentences_embedding, targets):
 
-                loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = do_train(word_embeddings, sentence_embedding, target, scorer)
+                loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = train_on_sentence(word_embeddings, sentence_embedding, target, scorer)
 
                 # if mst_neg_log_prob != torch.inf and not mst_neg_log_prob.isnan():
                 #     total_mst_neg_log_probs += mst_neg_log_prob
@@ -544,7 +557,6 @@ def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None
             writer.add_scalar("mean_mst_prob", mst_probs.mean(), overall_iter)
             writer.add_scalar("target_prob", target_probs.mean(), overall_iter)
             # writer.add_scalar("mst_neg_log_probs", total_mst_neg_log_probs, overall_iter)
-            # writer.add_scalar("cross_entropy_loss", total_loss, overall_iter)
             writer.add_scalar("batch_mean_sentence_length", np.mean([len(target) for target in targets]), overall_iter)
             writer.add_scalar("batch_num_sentences", len(targets), overall_iter)
 
@@ -567,8 +579,8 @@ def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None
                 for word_embeddings, sentence_embedding, target in zip(sentences_word_embeddings, sentences_embedding,
                                                                        targets):
 
-                    loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = do_train(word_embeddings, sentence_embedding,
-                                                                              target, scorer)
+                    loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = train_on_sentence(word_embeddings, sentence_embedding,
+                                                                                                                          target, scorer)
 
                     pred_mst = torch.Tensor(constr[1:]).to(device)
                     acc = pred_mst == target
@@ -590,7 +602,6 @@ def main2(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None
                 writer.add_scalar("val_mean_mst_prob", mst_probs.mean(), overall_iter)
                 writer.add_scalar("val_target_prob", target_probs.mean(), overall_iter)
                 # writer.add_scalar("val_mst_neg_log_probs", total_mst_neg_log_probs, overall_iter)
-                # writer.add_scalar("val_cross_entropy_loss", total_loss, overall_iter)
                 writer.add_scalar("val_mean_acc", torch.mean(torch.Tensor(val_accs)), overall_iter)
 
             loop.set_description(f"Epoch [{epoch}/{n_epochs}]")
@@ -609,5 +620,5 @@ if __name__ == '__main__':
     parser.add_argument("--hist_weights_every", default=5, type=int)
     args = parser.parse_args()
     print(vars(args))
-    main2(**vars(args))
+    main(**vars(args))
 

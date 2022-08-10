@@ -28,9 +28,9 @@ if __name__ == '__main__':
     i = 1
     word_embeddings, sentence_embedding, target = sentences_word_embeddings[i], sentences_embedding[i], targets[i]
 
-    loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = do_train(word_embeddings,
-                                                                                                 sentence_embedding,
-                                                                                                 target, scorer)
+    loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = train_on_sentence(word_embeddings,
+                                                                                                          sentence_embedding,
+                                                                                                          target, scorer)
 
 
     G1 = get_graphviz(input_data[i]['tokens'], constr[1:])
