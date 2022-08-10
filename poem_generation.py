@@ -57,9 +57,6 @@ with open('vocab.pkl', 'rb') as file:
 
 
 
-
-
-
 def set_scores_to_inf_for_banned_tokens(scores, banned_tokens):
     """
     Modifies the scores in place by setting the banned token positions to `-inf`. Banned token is expected to be a
@@ -176,25 +173,34 @@ def get_last_word_indicators(word_syllables, rep):
     last_word_indicator = np.concatenate([last_word_indicator, np.zeros(1)]) - np.concatenate(
         [np.zeros(1), last_word_indicator])
 
-    # The first line is line number 0. Etc.
-    if current_line_num_syllables > 0:
-        actual_line_num = line_num
-        actual_current_line_num_syllables = current_line_num_syllables
-    else:
-        actual_line_num = max(line_num - 1, 0)
-        actual_current_line_num_syllables = current_line_num_syllables
-
-    if current_line_num_syllables == 0:  # either completely no syllables, or at end of some line
-        actual_line_num = max(line_num - 1, 0)  # still on previous line. don't go below 0 though
-        if line_num == 0:  # completely no syllables
-            actual_current_line_num_syllables = 0
-        else: # line_num > 0: finished at least one line.
-            actual_current_line_num_syllables = rep[actual_line_num % len(rep)]
-    else:  # midway through a line.
-        actual_current_line_num_syllables = current_line_num_syllables
-        actual_line_num = line_num
-
-    return actual_current_line_num_syllables, actual_line_num, last_word_indicator
+    return current_line_num_syllables, line_num, last_word_indicator, syllable_target
+    #
+    # # The first line is line number 0. Etc.
+    # if current_line_num_syllables > 0:
+    #     return line_num, current_line_num_syllables, last_word_indicator, syllable_target
+    #
+    # else:  # completely no syllables
+    #     return line_num,
+    #
+    #
+    # if current_line_num_syllables > 0:
+    #     actual_line_num = line_num
+    #     actual_current_line_num_syllables = current_line_num_syllables
+    # else:
+    #     actual_line_num = max(line_num - 1, 0)
+    #     actual_current_line_num_syllables = current_line_num_syllables
+    #
+    # if current_line_num_syllables == 0:  # either completely no syllables, or at end of some line
+    #     actual_line_num = max(line_num - 1, 0)  # still on previous line. don't go below 0 though
+    #     if line_num == 0:  # completely no syllables
+    #         actual_current_line_num_syllables = 0
+    #     else: # line_num > 0: finished at least one line.
+    #         actual_current_line_num_syllables = rep[actual_line_num % len(rep)]
+    # else:  # midway through a line.
+    #     actual_current_line_num_syllables = current_line_num_syllables
+    #     actual_line_num = line_num
+    #
+    # return actual_current_line_num_syllables, actual_line_num, last_word_indicator
 
 def get_last_syllable_breakpoint(word_syllables, n_syllables):
     word_num_syllables = [syllables for word, syllables in word_syllables]
@@ -219,7 +225,7 @@ for word in tqdm.tqdm(vocab['idx2sym'], total=len(vocab['idx2sym'])):
 
 idx_to_num_syllables = np.array(idx_to_num_syllables)
 
-class long_word_encourager(LogitsProcessor):
+class LongWordEncourager(LogitsProcessor):
     def __init__(self, num_syllables=3, sd=2):
         self.num_syllables = num_syllables
         self.idxs_of_num_syllables = []
@@ -231,29 +237,60 @@ class long_word_encourager(LogitsProcessor):
 
 
     def __call__(self, input_ids, scores):
-        print('hi')
-        # mean = torch.mean(scores)
-        # sd = torch.std(scores)
-        # our tensors are so big that these sometimes give nan. Instead just hardcode :( sd = 4 why not.
-        # sd = 4
-
-        # scores2 = scores.clone()
-        # if torch.any(scores.isnan()):
-        #     print('oh no')
-        # for beam_index, (beam_input_ids, beam_scores) in enumerate(zip(input_ids, scores)):
-        #     for num_syllables in range(4, 10):
-        #         beam_scores[self.idxs_of_num_syllables[num_syllables]] += sd
-        #
         scores[:, self.idxs_of_high_num_syllables] += self.sd
-
-        # if torch.any(scores.isnan()):
-        #     print('oh no again')
         return scores
 
 
-# we can't find \n in transfoxl vocab so instead will use ',' - id 1
-class syllable_line_logits(LogitsProcessor):
-    def __init__(self, num_syllables=7):
+
+def get_rhyming_words(word):
+    word = re.sub('[^a-z\']', '', word.lower())
+    try:
+        syllable_to_words = ph.get_perfect_rhymes(word, num_syllables=1)  # most permissive - only rhyme last syllable
+    except KeyError:
+        return []
+    output = []
+    for word_list in syllable_to_words.values():
+        output += word_list
+    return output
+
+
+
+class BanNonWords(LogitsProcessor):
+    def __init__(self):
+        # We will allow the first three: <eos> , .
+        self.vocab_invalid_idx = [idx for idx, sym in enumerate(vocab['idx2sym']) if not sym in cmu][3:]
+
+    def __call__(self, input_ids, scores):
+        banned_tokens = []
+        # for every beam (partially generated sentence)
+        for beam_index, (beam_input_ids, beam_scores) in enumerate(zip(input_ids, scores)):
+            banned_tokens.append(self.vocab_invalid_idx)
+        # set the scores of all banned tokens over the beams to -inf
+        scores = set_scores_to_inf_for_banned_tokens(scores, banned_tokens)
+        return scores
+
+class LineCommaPolice(LogitsProcessor):
+    def __init__(self, num_syllables):
+        self.num_syllables = num_syllables
+
+    def __call__(self, input_ids, scores):
+      # for every beam (partially generated sentence)
+        for beam_index, (beam_input_ids, beam_scores) in enumerate(zip(input_ids, scores)):
+            # get the last token of this beam
+            text = tokenizer.decode(beam_input_ids)
+            word_syllables = get_text_syllables(text)
+
+            # how many syllables we're into the current line.
+            current_line_num_syllables, actual_line_num, last_word_indicator, syllable_target = \
+                get_last_word_indicators([sylls for word, sylls in word_syllables], self.num_syllables)
+
+            if current_line_num_syllables == 0 and text[-1] != ',':
+                beam_scores[2] += 20.0
+        return scores
+
+
+class syllable_line_rhyming_logits_smarter(LogitsProcessor):
+    def __init__(self, num_syllables=[3,5], sd=3.5):
         self.num_syllables = num_syllables
         self.idxs_of_num_syllables = []
         for num_syllables in range(15):
@@ -272,114 +309,6 @@ class syllable_line_logits(LogitsProcessor):
         for i in range(1, 10):
             idxs = np.where(cs_cmu(vocab['idx2sym']) == i)
             self.syllable_idxs.append(idxs[0])
-
-    def __call__(self, input_ids, scores):
-
-        banned_tokens = []
-        for beam_index, (beam_input_ids, beam_scores) in enumerate(zip(input_ids, scores)):
-            text = tokenizer.decode(beam_input_ids)
-            word_syllables = get_text_syllables(text)
-
-            # last_rhyme_word_index = get_last_syllable_breakpoint(word_syllables, self.n_syllables)
-            # if last_rhyme_word_index:
-            #     last_rhyme_word = word_syllables[last_rhyme_word_index][0]
-            #     rhyming_words = set(pronouncing.rhymes(last_rhyme_word))
-            #     rhyming_words_idxs = np.array([self.value_to_idx[self.word_to_value[word]] for word in rhyming_words if
-            #                                    word in self.word_to_value])
-            # else:
-            #     rhyming_words = set([])
-            #     rhyming_words_idxs = np.array([])
-
-            num_syllables = get_text_num_syllables(text)
-            # print(num_syllables)
-            num_syllables = num_syllables % self.num_syllables
-
-            to_ban = [idxs for i, idxs in enumerate(self.syllable_idxs) if i + 1 + num_syllables > self.num_syllables]
-
-            # just_fit_ban = []
-            # just_fit_idxs = self.syllable_idxs[self.n_syllables - num_syllables - 1]
-            # just_fit_rhyming_intersection = np.intersect1d(rhyming_words_idxs, just_fit_idxs, assume_unique=True)
-            # just_fit_rhyming_intersection = set(just_fit_rhyming_intersection)  # indices within just_fit_idxs
-            # just_fit_idxs_ban = np.array([idx for idx in just_fit_idxs if not idx in just_fit_rhyming_intersection])
-            #
-            # to_ban.append(just_fit_idxs_ban)
-
-
-            if to_ban:
-                print(f'num_syllables: {num_syllables}')
-                print(text)
-                print(quick_neatify_text(text))
-                print(len(to_ban))
-            banned_tokens.append(np.concatenate(to_ban) if to_ban else [])
-
-        scores = set_scores_to_inf_for_banned_tokens(scores, banned_tokens)
-
-        return scores
-
-
-def get_rhyming_words(word):
-    word = re.sub('[^a-z\']', '', word.lower())
-    try:
-        syllable_to_words = ph.get_perfect_rhymes(word, num_syllables=1)  # most permissive - only rhyme last syllable
-    except KeyError:
-        return []
-    output = []
-    for word_list in syllable_to_words.values():
-        output += word_list
-    return output
-
-class syllable_line_rhyming_logits(syllable_line_logits):
-    def __init__(self, num_syllables=7, sd=3.5):
-        super().__init__(num_syllables=num_syllables)
-        self.sd = sd
-    def __call__(self, input_ids, scores):
-
-        banned_tokens = []
-        for beam_index, (beam_input_ids, beam_scores) in enumerate(zip(input_ids, scores)):
-            text = tokenizer.decode(beam_input_ids)
-            word_syllables = get_text_syllables(text)
-
-            last_rhyme_word_index = get_last_syllable_breakpoint(word_syllables, self.num_syllables)
-            if last_rhyme_word_index:
-                last_rhyme_word = word_syllables[last_rhyme_word_index][0]
-                rhyming_words = set(get_rhyming_words(last_rhyme_word))
-                rhyming_words_idxs = np.array([vocab['sym2idx'][word] for word in rhyming_words if
-                                               word in vocab['sym2idx']])
-            else:
-                rhyming_words = set([])
-                rhyming_words_idxs = np.array([])
-
-            num_syllables = get_text_num_syllables(text)
-            # print(num_syllables)
-            num_syllables = num_syllables % self.num_syllables
-
-            to_ban = [idxs for i, idxs in enumerate(self.syllable_idxs) if i + 1 + num_syllables > self.num_syllables]
-
-            just_fit_idxs = self.syllable_idxs[self.num_syllables - num_syllables - 1]
-            just_fit_rhyming_intersection = np.intersect1d(rhyming_words_idxs, just_fit_idxs, assume_unique=True)
-            # just_fit_rhyming_intersection = set(just_fit_rhyming_intersection)  # indices within just_fit_idxs
-            just_fit_idxs_ban = np.array([idx for idx in just_fit_idxs if not idx in just_fit_rhyming_intersection])
-
-            beam_scores[just_fit_rhyming_intersection] += self.sd
-
-            to_ban.append(just_fit_idxs_ban)
-
-
-            if to_ban:
-                print(f'num_syllables: {num_syllables}')
-                print(text)
-                print(quick_neatify_text(text))
-                print(len(to_ban))
-            banned_tokens.append(np.concatenate(to_ban) if to_ban else [])
-
-        scores = set_scores_to_inf_for_banned_tokens(scores, banned_tokens)
-        return scores
-
-
-
-class syllable_line_rhyming_logits_smarter(syllable_line_logits):
-    def __init__(self, num_syllables=[3,5], sd=3.5):
-        super().__init__(num_syllables=num_syllables)
         self.sd = sd
 
     def __call__(self, input_ids, scores):
@@ -390,7 +319,7 @@ class syllable_line_rhyming_logits_smarter(syllable_line_logits):
             word_syllables = get_text_syllables(text)
 
             # how many syllables we're into the current line.
-            current_line_num_syllables, actual_line_num, last_word_indicator = \
+            current_line_num_syllables, actual_line_num, last_word_indicator, syllable_target = \
                 get_last_word_indicators([sylls for word, sylls in word_syllables], self.num_syllables)
 
 
