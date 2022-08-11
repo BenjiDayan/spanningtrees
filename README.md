@@ -1,4 +1,16 @@
-# Minimum Spanning Tree
+# NLP Constrained structural Inference
+
+## Dependency Parsing
+See [benji_transformer_play.py](benji_transformer_play.py) for training a dependency parser
+
+
+## Poem Generation
+
+
+
+## Minimum Spanning Tree
+We use the MST algorithm from Zmigrod: here's their description
+
 This library contains a modified implementation of the Maximum Spanning Tree (MST) algorithm proposed by Tarjan (1977) and Camerini et al. (1979).
 The MST algorithm is a popular decoding algorithm for graph-based depenedency parsing.
 However, dependency trees often have a constraint that only one edge may emanate from the root.
@@ -16,47 +28,7 @@ A detailed description of these algorithms including proofs of correctness can b
 and
 ["On Finding the K-best Non-projective Dependency Trees"](https://arxiv.org/abs/2106.00780)
 .
-
-## Runtime Experiments
-A runtime experiment on random weights is available to run in `notes/runtime_experiment.py`
-
-## Citation
-
-This code is for the papers _Please Mind the Root: Decoding Arborescences for Dependency Parsing_ and
-_On Finding the K-best Non-projective Dependency Trees_ featured in EMNLP 2020 and ACL 2021 respectively.
-Please cite as:
-
-```bibtex
-@inproceedings{zmigrod-etal-2020-please,
-    title = "Please Mind the Root: {D}ecoding Arborescences for Dependency Parsing",
-    author = "Zmigrod, Ran  and
-      Vieira, Tim  and
-      Cotterell, Ryan",
-    booktitle = "Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)",
-    month = nov,
-    year = "2020",
-    address = "Online",
-    publisher = "Association for Computational Linguistics",
-    url = "https://www.aclweb.org/anthology/2020.emnlp-main.390",
-    doi = "10.18653/v1/2020.emnlp-main.390",
-    pages = "4809--4819",
-}
-
-@inproceedings{zmigrod-etal-2021-finding,
-    title = "On Finding the K-best Non-projective Dependency Trees",
-    author = "Zmigrod, Ran  and
-      Vieira, Tim  and
-      Cotterell, Ryan",
-    booktitle = "Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (Volume 1: Long Papers)",
-    month = aug,
-    year = "2021",
-    address = "Online",
-    publisher = "Association for Computational Linguistics",
-    url = "https://aclanthology.org/2021.acl-long.106",
-    doi = "10.18653/v1/2021.acl-long.106",
-    pages = "1324--1337",
-}
-```
+## Other things from MST README
 
 ## Requirements and Installation
 

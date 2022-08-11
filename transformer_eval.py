@@ -7,7 +7,15 @@ if __name__ == '__main__':
                   [-54.8882, -8.4623, -55.4405, -44.9618],
                   [-113.3286, -79.5341, -86.2449, -108.3712]])
 
-    out = beam_search_matrix(a, n_beam=1)
+
+    extended_mat_np = np.array([[-16.44078 , -21.964602, -45.959885],
+       [-35.478233, -13.045111, -48.93541 ],
+       [-37.505028, -43.668182, -27.780647],
+       [-35.079395, -22.018314, -47.382366]], dtype=np.float32)
+
+    out = beam_search_matrix(a, n_beam=7)
+
+    bs_out = beam_search_matrix(extended_mat_np, n_beam=7)
 
 
     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")

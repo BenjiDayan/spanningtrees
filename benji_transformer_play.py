@@ -375,6 +375,11 @@ def get_mst(extended_mat, r, mat, Z, target):
     return constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs
 
 
+def get_dep_tree_score(mat: np.ndarray, head_list: List[int]):
+    # head_list is e.g. [4,1,2,0] i.e. word 1 has head word 4. and word 4 has head word root
+    assert -1 not in head_list
+    return sum([mat[head, i] for i, head in enumerate(head_list)])
+
 def beam_search_matrix(mat: np.ndarray, n_beam = 1):
     """simple beam search on matrix. Positive scores are better. Any valid tree must have one root and no cycles -
     this is enforced by tweaking scores, with many copies of edited matrices
@@ -403,15 +408,35 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
 
         return dependents
 
+    def get_head_list(word_i: int, current_heads: np.ndarray) -> List[int]:
+        # e.g.[-1, 1, 2, 0]
+        # with word_i = 3 (the 3rd word). have ? -> 1 -> 2 -> 3; r -> 4.
+        # so return head list of [3, 2, 1]
+        heads = [word_i]
+        while True:
+            if word_i == 0:  # root has no head
+                break
+
+            if current_heads[word_i - 1] != -1:
+                word_i = current_heads[word_i - 1]
+                if word_i not in heads:
+                    heads.append(word_i)
+                else:  # cycle.
+                    break
+            else:
+                break
+
+        return heads
+
     n_words = mat.shape[1]  # number of words - we must choose exactly n_words arcs, one head for each word.
     # stored as (current_score_matrix, current_heads, current_score) pairs
     # we designate -1 as no head, 0 as root, 1 as first word etc.
-    # So [-1, 1, 2, 0] means words at indices 0, 1, 2, 3 have 0 no head, 1 has head 0, 2 has head 1 and 3 has head root
-    # only acceptable next step is [4,1,2,0] i.e. word 0 has head word 3.
+    # So [-1, 1, 2, 0] means a sentence with 4 words. word 1 has no head, 2 has head 1, 3 has head 2 and 4 has head root
+    # only acceptable next step is [4,1,2,0] i.e. word 1 has head word 4.
     mat = mat.copy()
     mat[range(1, n_words+1), range(n_words)] = -np.inf
     # I think this is (modified score matrix, current assigned dep tree, score) triples
-    matrix_set = [(mat.copy(), -np.ones((n_words,)), 0.)]
+    matrix_set = [(mat.copy(), -np.ones((n_words,)).astype(np.int16), 0.)]
     for n in range(n_words):
         new_matrix_set = []
         for current_score_matrix, current_heads, current_score in matrix_set:
@@ -423,13 +448,19 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
                     new_heads[dep_i] = head_i  # don't account for root here, -1 is empty, 0 is root, 1 is 1st word etc.
                     if head_i == 0:  # chose root as head
                         new_score_matrix[0, :] = -np.inf  # no one else can have root as head
-                    else:
+
+                    head_list = get_head_list(head_i, new_heads)
+                    highest_head = head_list[-1]
+                    if highest_head != 0:  # it's a non-root word. Disallow it to connect to all the children
                         # e.g. [-1, 1, 2, 0] where head_i=1 (new head just assigned is word 1 has head word 0)
                         # output is [1,2,3] which we don't convert to [0,1,2]: word 0 has children 0,1,2
                         # leave as is as we're using these as new heads to set to -inf
                         children = list(get_dependent_set(head_i, new_heads))
                         # head may not attach to any of its children, including itself. head_i=1 is dep 0 etc. so -1
-                        new_score_matrix[children, head_i-1] = -np.inf
+                        new_score_matrix[children, highest_head-1] = -np.inf
+
+                    # the dependent word is never allowed to have > 1 (extra) heads
+                    new_score_matrix[:, dep_i] = -np.inf
 
                     new_matrix_set.append((new_score_matrix, new_heads, new_score))
 
@@ -439,7 +470,6 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
         matrix_set = new_matrix_set[:n_beam]
 
     return matrix_set
-
 
 def train_on_sentence(word_embeddings: torch.Tensor, sentence_embedding: torch.Tensor, target, scorer: Scorer2):
     """
