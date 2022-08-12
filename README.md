@@ -1,4 +1,6 @@
-# NLP Constrained structural Inference
+# NLP Constrained Sequential Inference
+
+This Course project explores sequential inference in NLP, particularly using FSA - inspired by [A General-Purpose Algorithm for Constrained Sequential Inference](https://aclanthology.org/K19-1045/)
 
 ## Dependency Parsing
 See [benji_transformer_play.py](benji_transformer_play.py) for training a dependency parser
@@ -11,8 +13,8 @@ Try [PoemGenerationDemo.ipynb](PoemGenerationDemo.ipynb) for poem generation wit
 [text_generation_beam_search.ipynb](text_generation_beam_search.ipynb) for a similar thing but instead using FSA enforced constraints.
 
 
-## Minimum Spanning Tree
-We use the MST algorithm from Zmigrod: here's their description
+## Maximum Spanning Tree
+We use the MST algorithm from Zmigrod: spanningtrees package forked from [https://github.com/rycolab/spanningtrees]
 
 ## Installation / Requirements
 Most of the .ipynb have built in `!pip install ...` blocks, and are suitable for running locally or e.g. on google colab.
