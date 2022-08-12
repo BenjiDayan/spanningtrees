@@ -5,6 +5,7 @@ See [benji_transformer_play.py](benji_transformer_play.py) for training a depend
 
 
 ## Poem Generation
+See [PoemGenerationDemo.ipynb](benji_transformer_play.py) for training a dependency parser
 
 
 

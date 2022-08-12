@@ -1,4 +1,5 @@
 from datetime import timedelta
+from typing import List, Union
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -142,7 +143,13 @@ def quick_neatify_text(text):
   return word_syllables
 
 
-def get_last_word_indicators(word_syllables, rep):
+def get_last_word_indicators(word_syllables: List[int], rep: Union[int, List[int]]):
+    """
+    :param word_syllables: e.g. [2, 0, 4, 4, 1, 0, 1, 1, 5, 0, 1] - syllables for each word in the text
+    :param rep: [7] for all lines 7 syllables, or [3,5] for alternating 3, 5
+    :return current_line_num_syllables, line_num, last_word_indicator, syllable_target:
+
+    """
     # rep: e.g. [7] for all lines 7 syllables, or [3,5] for alternating 3, 5
     # syllable lines.
     # e.g. [2, 0, 4, 4, 1, 0, 1, 1, 5, 0, 1] as input gives
@@ -174,33 +181,7 @@ def get_last_word_indicators(word_syllables, rep):
         [np.zeros(1), last_word_indicator])
 
     return current_line_num_syllables, line_num, last_word_indicator, syllable_target
-    #
-    # # The first line is line number 0. Etc.
-    # if current_line_num_syllables > 0:
-    #     return line_num, current_line_num_syllables, last_word_indicator, syllable_target
-    #
-    # else:  # completely no syllables
-    #     return line_num,
-    #
-    #
-    # if current_line_num_syllables > 0:
-    #     actual_line_num = line_num
-    #     actual_current_line_num_syllables = current_line_num_syllables
-    # else:
-    #     actual_line_num = max(line_num - 1, 0)
-    #     actual_current_line_num_syllables = current_line_num_syllables
-    #
-    # if current_line_num_syllables == 0:  # either completely no syllables, or at end of some line
-    #     actual_line_num = max(line_num - 1, 0)  # still on previous line. don't go below 0 though
-    #     if line_num == 0:  # completely no syllables
-    #         actual_current_line_num_syllables = 0
-    #     else: # line_num > 0: finished at least one line.
-    #         actual_current_line_num_syllables = rep[actual_line_num % len(rep)]
-    # else:  # midway through a line.
-    #     actual_current_line_num_syllables = current_line_num_syllables
-    #     actual_line_num = line_num
-    #
-    # return actual_current_line_num_syllables, actual_line_num, last_word_indicator
+
 
 def get_last_syllable_breakpoint(word_syllables, n_syllables):
     word_num_syllables = [syllables for word, syllables in word_syllables]
@@ -242,7 +223,7 @@ class LongWordEncourager(LogitsProcessor):
 
 
 
-def get_rhyming_words(word):
+def get_rhyming_words(word: str) -> List[str]:
     word = re.sub('[^a-z\']', '', word.lower())
     try:
         syllable_to_words = ph.get_perfect_rhymes(word, num_syllables=1)  # most permissive - only rhyme last syllable
@@ -257,8 +238,9 @@ def get_rhyming_words(word):
 
 class BanNonWords(LogitsProcessor):
     def __init__(self):
-        # We will allow the first three: <eos> , .
-        self.vocab_invalid_idx = [idx for idx, sym in enumerate(vocab['idx2sym']) if not sym in cmu][3:]
+        # We will allow the first three: <eos> , . Actually won't allow <eos> as
+        # my poems get too short
+        self.vocab_invalid_idx = [0] + [idx for idx, sym in enumerate(vocab['idx2sym']) if not sym in cmu][3:]
 
     def __call__(self, input_ids, scores):
         banned_tokens = []
@@ -289,7 +271,7 @@ class LineCommaPolice(LogitsProcessor):
         return scores
 
 
-class syllable_line_rhyming_logits_smarter(LogitsProcessor):
+class LineRhymer(LogitsProcessor):
     def __init__(self, num_syllables=[3,5], sd=3.5):
         self.num_syllables = num_syllables
         self.idxs_of_num_syllables = []
