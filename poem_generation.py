@@ -1,13 +1,13 @@
-from datetime import timedelta
 from typing import List, Union
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, TransfoXLTokenizer, TransfoXLModel, TransfoXLLMHeadModel
 
-tokenizer = AutoTokenizer.from_pretrained('gpt2')
-model = AutoModelForCausalLM.from_pretrained("gpt2")
-
-import sys
-sys.path.append('../../../AFLT/aflt-f2022')
+from transformers import (
+    BeamSearchScorer,
+    LogitsProcessorList,
+    StoppingCriteriaList,
+    MaxLengthCriteria
+)
 
 from nltk.tokenize import SyllableTokenizer
 from nltk import word_tokenize
@@ -22,32 +22,16 @@ from nltk.corpus import cmudict
 cmu = cmudict.dict()
 
 import tqdm
-
-import time
 import re
-import pronouncing
 
 from transformers import LogitsProcessor
 import numpy as np
-from string import ascii_lowercase, ascii_uppercase
 
-import transformers
-
-from transformers import TransfoXLTokenizer, TransfoXLModel, TransfoXLLMHeadModel
-
-from transformers import (
-    BeamSearchScorer,
-    LogitsProcessorList,
-    StoppingCriteriaList,
-    MaxLengthCriteria
-)
 import torch
 
 from Phyme import Phyme
 
 ph = Phyme()
-
-
 
 tokenizer = TransfoXLTokenizer.from_pretrained("transfo-xl-wt103")
 model = TransfoXLLMHeadModel.from_pretrained("transfo-xl-wt103")
@@ -108,8 +92,12 @@ def count_syllables_cmu(word):
         return 0
 
 
-def poemify(text, syllables):
-    """text: a str. syllables: a list of integers or just one integer."""
+def poemify(text: str, syllables: Union[int, List[int]]):
+    """Add new lines to text for nice printing, according to sylalbles-per-line scheme.
+    :param text: a string of a whole poem
+    :param syllables: our syllables per line scheme e.g. [3, 5] for alternating lines of 3 and 5 syllables
+    :return: text with \n inserted at the end of each line.
+    """
     new_text = ""
     syll_current = 0
     words = word_tokenize(text)
@@ -238,9 +226,10 @@ def get_rhyming_words(word: str) -> List[str]:
 
 class BanNonWords(LogitsProcessor):
     def __init__(self):
-        # We will allow the first three: <eos> , . Actually won't allow <eos> as
-        # my poems get too short
-        self.vocab_invalid_idx = [0] + [idx for idx, sym in enumerate(vocab['idx2sym']) if not sym in cmu][3:]
+        # We will allow the first three: <eos> , .
+        # We tried disallowing <eos> but for some reason this sometimes makes the probability inf?? idk why.
+        # Unclear why.
+        self.vocab_invalid_idx = [idx for idx, sym in enumerate(vocab['idx2sym']) if not sym in cmu][3:]
 
     def __call__(self, input_ids, scores):
         banned_tokens = []
@@ -277,9 +266,6 @@ class LineRhymer(LogitsProcessor):
         self.idxs_of_num_syllables = []
         for num_syllables in range(15):
             self.idxs_of_num_syllables.append(np.where(idx_to_num_syllables == num_syllables)[0])
-
-        # self.idxs_of_high_num_syllables = np.where(idx_to_num_syllables >= self.num_syllables)[0]
-        # self.sd = sd  # "standard deviation of raw scores" - how much to add onto the longer words
 
         self.line_sep_id = vocab['sym2idx'][',']  # = 1
 
@@ -350,53 +336,34 @@ class LineRhymer(LogitsProcessor):
 
 
 if __name__ == '__main__':
-    def poemify(text, syllables):
-        """text: a str. syllables: a list of integers or just one integer."""
-        new_text = ""
-        syll_current = 0
-        words = word_tokenize(text)
-        syllables = [syllables] if type(syllables) is not list else syllables
-        syllables = syllables * len(words)  # make sure to repeat more than enough lines
-        syllables_iterator = iter(syllables)
-        syll_target = next(syllables_iterator)
-        for word in words:
-            word_syll = count_syllables_cmu(word)
-            if word_syll > 0:
-                if syll_current == syll_target:
-                    syll_current = word_syll
-                    new_text += '\n' + word
-                    syll_target = next(syllables_iterator)
-                elif syll_current + word_syll > syll_target:
-                    syll_current = syll_current + word_syll - syll_target
-                    new_text += word + '\n'  # This shouldn't really happen.
-                    syll_target = next(syllables_iterator)
-                else:
-                    syll_current += word_syll
-                    new_text += ' ' + word
-            else:
-                new_text += ' ' + word
+    ####### Example use: but do see PoemGeneration.ipynb instead:
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device(device)
+    model = model.to(device)
 
-        return new_text
-    text = 'Over hill, over dale, meeting trade football fans, mail, and local teams, including "Catalunya Catalunya", "Catalunya" (ale), formed the youth of the dale. possible collegiate footballers'
+    lcp = LineCommaPolice([6])
+    poem_processor = LineRhymer(num_syllables=[6], sd=4.2)  # LineRhymer(num_syllables=[6], sd = 4.2)
+    word_banning_processor = BanNonWords()
 
-    poemed = poemify(text, [6,7,8])
-    print(poemed)
+    # logits_processor = LogitsProcessorList([long_word_encourager()])
+    logits_processor = LogitsProcessorList([lcp, poem_processor, word_banning_processor])
 
 
-    logits_processor = LogitsProcessorList([long_word_encourager()])
-
-    prompt = 'The wind rushed towards the man who lifted the spear from'
+    prompt = 'Standing here all lonely,'
     prompt_tokenized = tokenizer(prompt, return_tensors='pt')
-    prompt_tokenized = prompt_tokenized['input_ids']
+    prompt_tokenized = prompt_tokenized['input_ids'].to(device)
     outputs = model.generate(
         input_ids=prompt_tokenized,
         num_return_sequences=2,
         no_repeat_ngram_size=2,
         remove_invalid_values=True,
         logits_processor=logits_processor,
-        max_length=20,
+        max_length=30,
         do_sample=True,
         top_p=0.92,
         top_k=0
-        # stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=20)])
     )
+
+    for output in outputs:
+        print(poemify(tokenizer.decode(output, skip_special_tokens=True), [6, 6]))
+        print('##########')
