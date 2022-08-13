@@ -13,23 +13,30 @@ from torch.utils.tensorboard import SummaryWriter
 
 from spanningtrees.mst import MST
 import graphviz
+from collections import deque
+
+from rayuela.base.semiring import Boolean
+from rayuela.base.symbol import Sym, ε
+from rayuela.fsa.fsa import FSA
+from rayuela.fsa.state import State
 
 torch.manual_seed(42)
 np.random.seed(42)
 
 
 def get_graphviz(tokens, dep_to_head):
-  G = graphviz.Digraph()
-  tokens = ['root'] + tokens
-  # print(tokens)
-  for i, token in enumerate(tokens):
-    G.node('q' + str(i), str(i) + '_' + token)
+    G = graphviz.Digraph()
+    tokens = ['root'] + tokens
+    # print(tokens)
+    for i, token in enumerate(tokens):
+        G.node('q' + str(i), str(i) + '_' + token)
 
-  for dep_i, head_i in enumerate(dep_to_head):
-    h, d = tokens[head_i], tokens[dep_i + 1]
-    # print(h, d)
-    G.edge('q' + str(head_i), 'q' + str(dep_i + 1))
-  return G
+    for dep_i, head_i in enumerate(dep_to_head):
+        h, d = tokens[head_i], tokens[dep_i + 1]
+        # print(h, d)
+        G.edge('q' + str(head_i), 'q' + str(dep_i + 1))
+    return G
+
 
 def get_word_idx(sent: str, word: str):
     return sent.split(" ").index(word)
@@ -52,8 +59,9 @@ def get_hidden_states(encoded, token_ids_word, model, layers,):
     return word_tokens_output.mean(dim=0)
 
 
-
 layers = [-4, -3, -2, -1]
+
+
 def get_bert_seq_layers(output, layers=None):
     """output: from bert. layers are the hidden states we want to extract.
     apparently summing -4: gives a good representation """
@@ -84,8 +92,10 @@ def sentence_to_word_nice(sentence, tokenizer, encoded=None):
     if encoded is None:
         encoded = tokenizer.encode_plus(sentence)
     word_ids = encoded.word_ids()
-    word_ids = {word_id: encoded.word_to_chars(word_id) for word_id in word_ids if word_id is not None}
-    word_ids = {word_id: (charspan, sentence[charspan.start:charspan.end]) for word_id, charspan in word_ids.items()}
+    word_ids = {word_id: encoded.word_to_chars(
+        word_id) for word_id in word_ids if word_id is not None}
+    word_ids = {word_id: (charspan, sentence[charspan.start:charspan.end])
+                for word_id, charspan in word_ids.items()}
     return word_ids
 
 
@@ -96,7 +106,8 @@ def match_words(word_list1, word_list2):
     False = all_fit is whether any tuple has length > 1, i.e. word_list2 isn't a partition refinement of word_list1.
     """
     # spans1, spans2 = word_list_to_spans(word_list1), word_list_to_spans(word_list2)
-    spans1, spans2 = [np.cumsum(list(map(len, word_list))) for word_list in [word_list1, word_list2]]
+    spans1, spans2 = [np.cumsum(list(map(len, word_list)))
+                      for word_list in [word_list1, word_list2]]
     out = []
     if len(spans1) == []:
         out = [(-1,)] * len(spans2)
@@ -133,11 +144,13 @@ def match_words(word_list1, word_list2):
 
 input_size = 768
 hidden_size = 500  # seems just to be a single hidden layer of size 500.
-dropout=0.33
+dropout = 0.33
+
 
 class Scorer(nn.Module):
     """Simple scorer. Takes head and dep word embeddings, runs them through a head and dep encoder, then does a
     bilinear transformation and sums the result - gives score for head word -> dep word."""
+
     def __init__(self):
         super().__init__()
         self.head = nn.Sequential(
@@ -150,13 +163,16 @@ class Scorer(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout)
         )
-        self.bilinear = nn.Bilinear(in1_features=hidden_size, in2_features=hidden_size, out_features=1)
-        self.extra_linear = nn.Linear(in_features=hidden_size, out_features=1, bias=False)
+        self.bilinear = nn.Bilinear(
+            in1_features=hidden_size, in2_features=hidden_size, out_features=1)
+        self.extra_linear = nn.Linear(
+            in_features=hidden_size, out_features=1, bias=False)
 
     def forward(self, word_vec_head, word_vec_dep, tanh=False):
         head_vec = self.head(word_vec_head)
         dep_vec = self.dep(word_vec_dep)
-        out = self.bilinear(head_vec, dep_vec) + self.extra_linear(head_vec + dep_vec)
+        out = self.bilinear(head_vec, dep_vec) + \
+            self.extra_linear(head_vec + dep_vec)
         out = out.sum(dim=-1)
         # trying this to make output smaller?
         if tanh:
@@ -164,6 +180,8 @@ class Scorer(nn.Module):
         return out
 
 # Like Scorer above but slightly different, produces a whole list of head -> dep scores for a list of word embeddings
+
+
 class Scorer2(nn.Module):
     def __init__(self):
         super().__init__()
@@ -179,8 +197,10 @@ class Scorer2(nn.Module):
             # nn.Dropout(dropout),
             nn.Linear(hidden_size, hidden_size),
         )
-        self.bilinear = nn.Bilinear(in1_features=hidden_size, in2_features=hidden_size, out_features=1)
-        self.extra_linear = nn.Linear(in_features=hidden_size, out_features=1, bias=False)
+        self.bilinear = nn.Bilinear(
+            in1_features=hidden_size, in2_features=hidden_size, out_features=1)
+        self.extra_linear = nn.Linear(
+            in_features=hidden_size, out_features=1, bias=False)
 
     def forward(self, word_embeddings, sentence_embedding=None, tanh=False):
         """word_embeddings: n x input_size where n is the number of words in the sentence
@@ -194,11 +214,13 @@ class Scorer2(nn.Module):
 
             dep_vecs2 = torch.tile(dep_vecs, (n, 1))  # n^2, hidden_size
 
-            head_vecs2 = head_vecs.expand(n, *head_vecs.shape)  # n, n, hidden_size
+            head_vecs2 = head_vecs.expand(
+                n, *head_vecs.shape)  # n, n, hidden_size
             head_vecs2 = head_vecs2.transpose(0, 1)
             head_vecs2 = head_vecs2.reshape(-1, head_vecs.shape[-1])
 
-            out = self.bilinear(head_vecs2, dep_vecs2) + self.extra_linear(head_vecs2 + dep_vecs2)
+            out = self.bilinear(head_vecs2, dep_vecs2) + \
+                self.extra_linear(head_vecs2 + dep_vecs2)
             out = out.sum(dim=-1)  # n^2
             out = out.reshape(n, n)
 
@@ -214,8 +236,10 @@ class Scorer2(nn.Module):
 def laplacian(A: torch.Tensor):
     L = -A  # L_ij = -A_ij
     n = len(A)
-    L[range(n), range(n)] = A.sum(dim=0) # L_jj = deg_in(v_j) = sum_i A_ij assuming A_jj = 0 I think.
+    # L_jj = deg_in(v_j) = sum_i A_ij assuming A_jj = 0 I think.
+    L[range(n), range(n)] = A.sum(dim=0)
     return L
+
 
 def kooplacian(A: torch.Tensor, r: torch.Tensor):
     """
@@ -230,16 +254,18 @@ def kooplacian(A: torch.Tensor, r: torch.Tensor):
     return L
 
 
-
 def get_embeddings(input_data, tokenizer, model):
     sentences, targets, word_lists1 = [], [], []
     for datum in input_data:
-        word_lists1.append(datum['tokens'])  # used for matching BERT words to input data words
+        # used for matching BERT words to input data words
+        word_lists1.append(datum['tokens'])
         sentences.append(datum['text'])
-        targets.append(torch.Tensor(list(map(int, datum['head']))).long().to(device))
+        targets.append(torch.Tensor(
+            list(map(int, datum['head']))).long().to(device))
 
     # sentences: List[str] = [training_data[i]['text'] for i in data_i]
-    batch_encoded = tokenizer(sentences, padding="longest", return_tensors="pt", truncation=True)
+    batch_encoded = tokenizer(
+        sentences, padding="longest", return_tensors="pt", truncation=True)
     for key in ['input_ids', 'token_type_ids', 'attention_mask']:
         batch_encoded[key] = batch_encoded[key].to(device)
 
@@ -257,42 +283,47 @@ def get_embeddings(input_data, tokenizer, model):
     all_fits = []
     sentences_word_id_tuples = []
     for word_list1, sentence_word_ids in zip(word_lists1, sentences_word_ids):
-        word_list2 = [sentence_word_ids[i][1] for i in range(len(sentence_word_ids))]
+        word_list2 = [sentence_word_ids[i][1]
+                      for i in range(len(sentence_word_ids))]
         correspondence, all_fit = match_words(word_list1, word_list2)
         all_fits.append(all_fit)
         sentences_word_id_tuples.append(correspondence)
 
     all_fits = np.array(all_fits)
 
-
     with torch.no_grad():
         output = model(**batch_encoded)
 
     last_layers = get_bert_seq_layers(output)
 
-    sentences_embedding = last_layers[:, 0, :].unsqueeze(dim=1)  # first token of each sequence embedding
+    sentences_embedding = last_layers[:, 0, :].unsqueeze(
+        dim=1)  # first token of each sequence embedding
 
     sentences_word_embeddings = []
     for sentence_i, (BERT_to_input_word_ids, encoded, all_fit) in enumerate(zip(sentences_word_id_tuples, encodeds, all_fits)):
         if not all_fit:
-            sentences_word_embeddings.append([torch.Tensor([1.0]).to(device)])  # will be ignored later anyway
+            # will be ignored later anyway
+            sentences_word_embeddings.append([torch.Tensor([1.0]).to(device)])
             continue
 
         sentences_word_embeddings.append([])
         BERT_token_word_ids = np.array(encoded.word_ids())
         # each tuple is one element, so e.g. [0, 0, 1, 2, 3, 4, 4, ...]. 1st 2 BERT words are word 0 of input and so on
         BERT_word_id_to_input_word_id = [x[0] for x in BERT_to_input_word_ids]
-        BERT_word_ids_grouped = group_indices_by_num(BERT_word_id_to_input_word_id)
+        BERT_word_ids_grouped = group_indices_by_num(
+            BERT_word_id_to_input_word_id)
         BERT_word_id_tuple: Tuple[int]
         for BERT_word_id_tuple in BERT_word_ids_grouped:
             token_ids = np.where(
                 np.logical_or.reduce([
                     BERT_token_word_ids == word_id
-                for word_id in BERT_word_id_tuple])
+                    for word_id in BERT_word_id_tuple])
             )[0]
-            sentences_word_embeddings[-1].append(last_layers[sentence_i, token_ids].mean(dim=0))
+            sentences_word_embeddings[-1].append(
+                last_layers[sentence_i, token_ids].mean(dim=0))
 
-    sentences_word_embeddings = [torch.stack(word_embeddings) for word_embeddings in sentences_word_embeddings]
+    sentences_word_embeddings = [torch.stack(
+        word_embeddings) for word_embeddings in sentences_word_embeddings]
 
     all_fits_indices = np.where(all_fits)[0]
     return sentences_embedding[all_fits_indices], [sentences_word_embeddings[i] for i in all_fits_indices], [targets[i] for i in all_fits_indices]
@@ -312,7 +343,7 @@ def group_indices_by_num(int_list):
 def get_partition(r_exp, exp_mat):
     """Computes sum over all valid spanning tree exp scores."""
 
-    #### Calculate partition function Z
+    # Calculate partition function Z
     L1 = laplacian(exp_mat)
     L2 = kooplacian(exp_mat, r_exp)
 
@@ -380,7 +411,8 @@ def get_dep_tree_score(mat: np.ndarray, head_list: List[int]):
     assert -1 not in head_list
     return sum([mat[head, i] for i, head in enumerate(head_list)])
 
-def beam_search_matrix(mat: np.ndarray, n_beam = 1):
+
+def beam_search_matrix(mat: np.ndarray, n_beam=1):
     """simple beam search on matrix. Positive scores are better. Any valid tree must have one root and no cycles -
     this is enforced by tweaking scores, with many copies of edited matrices
 
@@ -399,9 +431,11 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
         dependents = {word_i}
         new_dependents = {word_i}
         while new_dependents != set():
-            new_dependents = [[x+1 for x in np.where(current_heads == i)[0]] for i in new_dependents]
+            new_dependents = [
+                [x+1 for x in np.where(current_heads == i)[0]] for i in new_dependents]
             # join together new dependents into a list then take a set just in case there are duplicates
-            new_dependents = set(reduce(lambda x, y: x + y, new_dependents, []))
+            new_dependents = set(
+                reduce(lambda x, y: x + y, new_dependents, []))
             if new_dependents.issubset(dependents):
                 break
             dependents = dependents.union(new_dependents)
@@ -428,7 +462,8 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
 
         return heads
 
-    n_words = mat.shape[1]  # number of words - we must choose exactly n_words arcs, one head for each word.
+    # number of words - we must choose exactly n_words arcs, one head for each word.
+    n_words = mat.shape[1]
     # stored as (current_score_matrix, current_heads, current_score) pairs
     # we designate -1 as no head, 0 as root, 1 as first word etc.
     # So [-1, 1, 2, 0] means a sentence with 4 words. word 1 has no head, 2 has head 1, 3 has head 2 and 4 has head root
@@ -444,10 +479,13 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
                 for head_i in range(n_words+1):
                     new_score_matrix = current_score_matrix.copy()
                     new_heads = current_heads.copy()
-                    new_score = current_score + current_score_matrix[head_i, dep_i]
-                    new_heads[dep_i] = head_i  # don't account for root here, -1 is empty, 0 is root, 1 is 1st word etc.
+                    new_score = current_score + \
+                        current_score_matrix[head_i, dep_i]
+                    # don't account for root here, -1 is empty, 0 is root, 1 is 1st word etc.
+                    new_heads[dep_i] = head_i
                     if head_i == 0:  # chose root as head
-                        new_score_matrix[0, :] = -np.inf  # no one else can have root as head
+                        # no one else can have root as head
+                        new_score_matrix[0, :] = -np.inf
 
                     head_list = get_head_list(head_i, new_heads)
                     highest_head = head_list[-1]
@@ -462,14 +500,92 @@ def beam_search_matrix(mat: np.ndarray, n_beam = 1):
                     # the dependent word is never allowed to have > 1 (extra) heads
                     new_score_matrix[:, dep_i] = -np.inf
 
-                    new_matrix_set.append((new_score_matrix, new_heads, new_score))
+                    new_matrix_set.append(
+                        (new_score_matrix, new_heads, new_score))
 
-        temp = {tuple(heads): i for i, (mat, heads, score) in enumerate(new_matrix_set)}
-        new_matrix_set = [new_matrix_set[i] for i in temp.values()]  # non duplicates
+        temp = {tuple(heads): i for i, (mat, heads, score)
+                in enumerate(new_matrix_set)}
+        new_matrix_set = [new_matrix_set[i]
+                          for i in temp.values()]  # non duplicates
         new_matrix_set.sort(key=lambda triple: triple[2], reverse=True)
         matrix_set = new_matrix_set[:n_beam]
 
     return matrix_set
+
+
+def beam_search_matrix_fsa(mat: np.ndarray, constraint_fsa: FSA, max_seq_length, n_beam=1):
+    """beam search using fsas. Positive scores are better. Any valid tree must have one root and no cycles -
+    this is enforced by using fsas and setting scores of wrong parsings to minus infinity.
+
+    :param mat:  head x dep matrix, n+1xn where first row is the score for having head as root
+    :param n_beam: number of beams for beam search
+    """
+    def charify(inp_number: int) -> chr:
+        """Converts a number (potentially represented by two characters) into a char for easy fsa reading
+        """
+        return chr(ord('A')+ inp_number)
+
+    def topologically_sort_and_stringify_heads(current_heads: np.ndarray) -> str:
+        """Turns the heads array into a string to feed into the fsa, the following way:
+        [3, 1, 2, 0, -1, 2] means (3->1) (1->2)... so these will be represented as (3,1) (1,2)...
+        sorting will be done starting with the minimum left values and continuing by topological order
+        until either all nodes are covered or there are no more connected nodes left, in which case we will go to
+        the next minimum left value that is not covered in the heads array. An example result:
+        [3, 1, 2, 0, -1, 2] -> '(-1,5)(0,4)(1,2)(2,3)(2,6)(3,1)' 
+        """
+        checker = current_heads.copy()
+        result_string = ""
+        q = deque()
+
+        while not np.all(checker > max_seq_length):
+            curr_ind = q.popleft() if q else np.argmin(checker)
+            result_string += f'({charify(checker[curr_ind])},{charify(curr_ind+1)})'
+
+            next_indices = np.where(checker == curr_ind+1)[0]
+            next_indices = next_indices[next_indices != curr_ind]
+            
+            if next_indices.size > 0:
+                q.extend(next_indices)
+
+            checker[curr_ind] = max_seq_length*5
+
+        return result_string
+
+
+    # number of words - we must choose exactly n_words arcs, one head for each word.
+    n_words = mat.shape[1]
+
+    head_set = [(-np.ones((n_words,)).astype(np.int16), 0.)]
+    for n in range(n_words):
+        new_head_set = []
+        for current_heads, current_score in head_set:
+            for dep_i in np.where(current_heads == -1)[0]:
+                for head_i in range(n_words+1):
+                    new_heads = current_heads.copy()
+                    new_heads[dep_i] = head_i
+
+                    new_score = current_score + \
+                        mat[head_i, dep_i]
+                    
+                    input_str = topologically_sort_and_stringify_heads(
+                        new_heads)
+
+                    accepted = constraint_fsa.accept(input_str)
+                    if accepted == Boolean(0):
+                        new_score = -np.inf
+                     
+                    new_head_set.append(
+                        (new_heads, new_score))
+
+        temp = {tuple(heads): i for i, (heads, score)
+                in enumerate(new_head_set)}
+        new_head_set = [new_head_set[i]
+                        for i in temp.values()]  # non duplicates
+        new_head_set.sort(key=lambda tuple: tuple[1], reverse=True)
+        head_set = new_head_set[:n_beam]
+
+    return head_set
+
 
 def train_on_sentence(word_embeddings: torch.Tensor, sentence_embedding: torch.Tensor, target, scorer: Scorer2):
     """
@@ -484,7 +600,8 @@ def train_on_sentence(word_embeddings: torch.Tensor, sentence_embedding: torch.T
     :param scorer: model to compute head -> dep scores.
     :return: loss, pred, constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs
     """
-    big_mat = scorer(torch.concat([sentence_embedding, word_embeddings]), tanh=False)
+    big_mat = scorer(torch.concat(
+        [sentence_embedding, word_embeddings]), tanh=False)
 
     mat = big_mat[1:, 1:]  # nxn word head x dep scores
     r = big_mat[0, 1:]  # n root -> word scores
@@ -497,16 +614,17 @@ def train_on_sentence(word_embeddings: torch.Tensor, sentence_embedding: torch.T
     n = len(r)
     exp_mat[range(n), range(n)] = 0.
 
-
     # Partition is quite sensitive. If values of r, exp are too small, then Z=0, and if too large then
     # Z=inf - this causes prob to be inf, 0 respectively, and neg log prob to be inf, -inf resp.
     Z1, Z2 = get_partition(r_exp, exp_mat)
 
     # Find maximum spanning tree, and its corresponding score
     extended_mat = torch.concat([r.unsqueeze(dim=0), mat], dim=0)
-    extended_mat = torch.concat([torch.zeros((extended_mat.shape[0], 1)).to(device), extended_mat], dim=1)
+    extended_mat = torch.concat(
+        [torch.zeros((extended_mat.shape[0], 1)).to(device), extended_mat], dim=1)
 
-    constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs = get_mst(extended_mat, r, mat, Z2, target)
+    constr, mst_prob, mst_neg_log_probs, target_prob, target_neg_log_probs = get_mst(
+        extended_mat, r, mat, Z2, target)
 
     # cross entropy loss - simpler and works better than mst_neg_log_probs as loss?
     # (N, C) where N is # of words and C is # of classes
@@ -522,31 +640,37 @@ def train_on_sentence(word_embeddings: torch.Tensor, sentence_embedding: torch.T
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-def main(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None):
+
+def main(lr=1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None):
     # load tokenizer, model and dataset.
     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-    model = AutoModel.from_pretrained("bert-base-cased", output_hidden_states=True).to(device)
+    model = AutoModel.from_pretrained(
+        "bert-base-cased", output_hidden_states=True).to(device)
     data = datasets.load_dataset("universal_dependencies", "en_gum")
 
     scorer = Scorer2().to(device)
-    save_path = (log_dir + '/save' if log_dir else './save') + '_epoch{epoch}.pt'
+    save_path = (log_dir + '/save' if log_dir else './save') + \
+        '_epoch{epoch}.pt'
     writer = SummaryWriter(log_dir=log_dir)
 
     # lr = 1e-4
     weight_decay = 0
     betas = (0.9, 0.9)
-    eps=1e-12
-    optimizer = torch.optim.Adam(scorer.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+    eps = 1e-12
+    optimizer = torch.optim.Adam(
+        scorer.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
 
+    training_data = [sequence for sequence in data['train']
+                     if len(sequence['tokens']) < 40]
 
-    training_data = [sequence for sequence in data['train'] if len(sequence['tokens']) < 40]
-
-    val_data = [sequence for sequence in data['test'] if len(sequence['tokens']) < 40]
+    val_data = [sequence for sequence in data['test']
+                if len(sequence['tokens']) < 40]
     val_indices = np.arange(len(val_data))
 
     for epoch in range(n_epochs):
         train_indices = np.random.permutation(len(training_data))
-        train_indices = [train_indices[n_batch * i:n_batch * (i + 1)] for i in range(len(train_indices) // n_batch)]
+        train_indices = [train_indices[n_batch * i:n_batch *
+                                       (i + 1)] for i in range(len(train_indices) // n_batch)]
         loop = tqdm.tqdm(train_indices)
         for iter_i, data_i in enumerate(loop):
             # batch of training data (multiple sentences)
@@ -556,7 +680,8 @@ def main(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None)
             # some sentences (and corresponding targets) are filtered out if we cannot achieve a partition refinement
             # relation between input data words and the BERT tokens (actually the BERT words for simplification)
             # get embeddings for batch of training all in one go (faster?)
-            sentences_embedding, sentences_word_embeddings, targets = get_embeddings(input_data, tokenizer, model)
+            sentences_embedding, sentences_word_embeddings, targets = get_embeddings(
+                input_data, tokenizer, model)
 
             optimizer.zero_grad()
             losses = []
@@ -565,7 +690,8 @@ def main(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None)
             # Simplest to process each sentence/dependency tree target separately.
             for word_embeddings, sentence_embedding, target in zip(sentences_word_embeddings, sentences_embedding, targets):
 
-                loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = train_on_sentence(word_embeddings, sentence_embedding, target, scorer)
+                loss, pred, constr, mst_prob, mst_neg_log_prob, target_prob, target_neg_log_probs = train_on_sentence(
+                    word_embeddings, sentence_embedding, target, scorer)
 
                 # if mst_neg_log_prob != torch.inf and not mst_neg_log_prob.isnan():
                 #     total_mst_neg_log_probs += mst_neg_log_prob
@@ -577,30 +703,41 @@ def main(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None)
                 else:
                     print('Loss was inf/nan! Oh dear')
 
-            losses, mst_probs, target_probs = map(torch.stack, [losses, mst_probs, target_probs])
+            losses, mst_probs, target_probs = map(
+                torch.stack, [losses, mst_probs, target_probs])
             losses.sum().backward()
 
             # print(mst_log_probs)
             optimizer.step()
             overall_iter = epoch * len(train_indices) + iter_i
-            writer.add_scalar("mean_cross_entropy_loss", losses.mean(), overall_iter)
+            writer.add_scalar("mean_cross_entropy_loss",
+                              losses.mean(), overall_iter)
             writer.add_scalar("mean_mst_prob", mst_probs.mean(), overall_iter)
             writer.add_scalar("target_prob", target_probs.mean(), overall_iter)
             # writer.add_scalar("mst_neg_log_probs", total_mst_neg_log_probs, overall_iter)
-            writer.add_scalar("batch_mean_sentence_length", np.mean([len(target) for target in targets]), overall_iter)
-            writer.add_scalar("batch_num_sentences", len(targets), overall_iter)
+            writer.add_scalar("batch_mean_sentence_length", np.mean(
+                [len(target) for target in targets]), overall_iter)
+            writer.add_scalar("batch_num_sentences",
+                              len(targets), overall_iter)
 
             if iter_i % hist_weights_every == 0:
-                writer.add_histogram('head.weight', scorer.head[0].weight, overall_iter)
-                writer.add_histogram('head.bias', scorer.head[0].bias, overall_iter)
-                writer.add_histogram('dep.weight', scorer.dep[0].weight, overall_iter)
-                writer.add_histogram('dep.bias', scorer.dep[0].bias, overall_iter)
-                writer.add_histogram('bilinear.weight', scorer.bilinear.weight, overall_iter)
-                writer.add_histogram('bilinear.bias', scorer.bilinear.bias, overall_iter)
+                writer.add_histogram(
+                    'head.weight', scorer.head[0].weight, overall_iter)
+                writer.add_histogram(
+                    'head.bias', scorer.head[0].bias, overall_iter)
+                writer.add_histogram(
+                    'dep.weight', scorer.dep[0].weight, overall_iter)
+                writer.add_histogram(
+                    'dep.bias', scorer.dep[0].bias, overall_iter)
+                writer.add_histogram(
+                    'bilinear.weight', scorer.bilinear.weight, overall_iter)
+                writer.add_histogram(
+                    'bilinear.bias', scorer.bilinear.bias, overall_iter)
 
                 input_indices = np.random.choice(val_indices, n_batch)
                 input_data = [val_data[i] for i in input_indices]
-                sentences_embedding, sentences_word_embeddings, targets = get_embeddings(input_data, tokenizer, model)
+                sentences_embedding, sentences_word_embeddings, targets = get_embeddings(
+                    input_data, tokenizer, model)
 
                 losses = []
                 mst_probs = []
@@ -626,13 +763,18 @@ def main(lr = 1e-3, n_epochs=100, n_batch=5, hist_weights_every=5, log_dir=None)
                     else:
                         print('Loss was inf/nan! Oh dear')
 
-                losses, mst_probs, target_probs = map(torch.stack, [losses, mst_probs, target_probs])
+                losses, mst_probs, target_probs = map(
+                    torch.stack, [losses, mst_probs, target_probs])
 
-                writer.add_scalar("val_mean_cross_entropy_loss", losses.mean(), overall_iter)
-                writer.add_scalar("val_mean_mst_prob", mst_probs.mean(), overall_iter)
-                writer.add_scalar("val_target_prob", target_probs.mean(), overall_iter)
+                writer.add_scalar("val_mean_cross_entropy_loss",
+                                  losses.mean(), overall_iter)
+                writer.add_scalar("val_mean_mst_prob",
+                                  mst_probs.mean(), overall_iter)
+                writer.add_scalar("val_target_prob",
+                                  target_probs.mean(), overall_iter)
                 # writer.add_scalar("val_mst_neg_log_probs", total_mst_neg_log_probs, overall_iter)
-                writer.add_scalar("val_mean_acc", torch.mean(torch.Tensor(val_accs)), overall_iter)
+                writer.add_scalar("val_mean_acc", torch.mean(
+                    torch.Tensor(val_accs)), overall_iter)
 
             loop.set_description(f"Epoch [{epoch}/{n_epochs}]")
             loop.set_postfix(loss=losses.mean().item())
@@ -651,4 +793,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(vars(args))
     main(**vars(args))
-
